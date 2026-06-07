@@ -1,59 +1,25 @@
 # Python
 __pycache__/
 *.py[cod]
-*$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
 *.egg-info/
-.installed.cfg
-*.egg
-
-# PyInstaller
-*.manifest
+dist/
+build/
 *.spec
+
+# Virtual environment
+venv/
+.venv/
 
 # IDE
 .vscode/
 .idea/
-*.swp
-*.swo
-*~
 
 # OS
 .DS_Store
 Thumbs.db
 
-# Temporary files
-*.log
-*.tmp
-*.bak
-
-# Security - Credentials and Secrets
-.kimi/
-.env
-.env.*
-*.pem
-*.key
-*.p12
-*.pfx
-secrets/
-credentials/
-# kimi-code.json 凭证文件位于用户主目录，不在项目中
-
-# Build artifacts
+# Project specific
 *.exe
-*.dll
-*.so
-*.dylib
+!dist/*.exe
+credentials.json
+*.log
