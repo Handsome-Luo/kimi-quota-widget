@@ -79,6 +79,7 @@ class KimiQuotaWidget(QWidget):
         self._error_blink = 0
         self._scale_factor = 1.0  # 当前缩放比例
         self._is_error_state = False  # 是否处于错误状态
+        self._last_update_time = None  # 最后成功更新时间
         
         self.init_ui()
         self.load_credentials()
@@ -327,6 +328,34 @@ class KimiQuotaWidget(QWidget):
                          Qt.AlignmentFlag.AlignCenter, f"{percentage}%")
         
         painter.restore()
+        
+        # 绘制窗口重置倒计时
+        if self.quota_data['window_reset_time']:
+            now = datetime.now(timezone.utc)
+            remaining = self.quota_data['window_reset_time'] - now
+            total_seconds = int(remaining.total_seconds())
+            if total_seconds > 0:
+                days = total_seconds // 86400
+                hours = (total_seconds % 86400) // 3600
+                minutes = (total_seconds % 3600) // 60
+
+                if days > 0:
+                    time_text = f"重置 {days}d {hours}h"
+                elif hours > 0:
+                    time_text = f"重置 {hours}h {minutes}m"
+                else:
+                    time_text = f"重置 {minutes}m"
+
+                painter.setPen(QColor(150, 170, 160, int(140 + self._pulse_intensity * 30)))
+                painter.setFont(QFont("Segoe UI", max(5, int(7 * self._scale_factor)), QFont.Weight.Light))
+
+                time_width = int(70 * self._scale_factor)
+                time_height = int(12 * self._scale_factor)
+                time_y_offset = int(24 * self._scale_factor)
+
+                painter.drawText(center_x - time_width // 2, center_y + time_y_offset,
+                                 time_width, time_height,
+                                 Qt.AlignmentFlag.AlignCenter, time_text)
     
     def create_icon(self):
         pixmap = QPixmap(24, 24)
@@ -491,8 +520,17 @@ class KimiQuotaWidget(QWidget):
             self.quota_data['window_used'] = int(window_detail.get('used', '0'))
             self.quota_data['window_limit'] = int(window_detail.get('limit', '100'))
             self.quota_data['window_remaining'] = int(window_detail.get('remaining', '100'))
+            
+            # 尝试解析窗口重置时间
+            window_reset = limits[0].get('resetTime') or window_detail.get('resetTime')
+            if window_reset:
+                self.quota_data['window_reset_time'] = datetime.fromisoformat(window_reset.replace('Z', '+00:00'))
+            elif reset_time_str:
+                # 降级使用周重置时间
+                self.quota_data['window_reset_time'] = self.quota_data['weekly_reset_time']
         
         self.quota_data['parallel_limit'] = int(data.get('parallel', {}).get('limit', '10'))
+        self._last_update_time = datetime.now()
     
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
