@@ -20,6 +20,5 @@ Thumbs.db
 
 # Project specific
 *.exe
-!dist/*.exe
 credentials.json
 *.log

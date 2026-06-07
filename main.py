@@ -72,7 +72,9 @@ class KimiQuotaWidget(QWidget):
             'window_limit': 100,
             'window_remaining': 100,
             'window_reset_time': None,
-            'parallel_limit': 10
+            'parallel_used': 0,
+            'parallel_limit': 10,
+            'parallel_remaining': 10,
         }
         
         self._pulse_intensity = 0
@@ -80,6 +82,7 @@ class KimiQuotaWidget(QWidget):
         self._scale_factor = 1.0  # 当前缩放比例
         self._is_error_state = False  # 是否处于错误状态
         self._last_update_time = None  # 最后成功更新时间
+        self._window_duration_seconds = 18000  # 窗口周期（默认300分钟）
         
         self.init_ui()
         self.load_credentials()
@@ -99,16 +102,48 @@ class KimiQuotaWidget(QWidget):
         
         self.animation_timer = QTimer(self)
         self.animation_timer.timeout.connect(self.update_animations)
-        self.animation_timer.start(8)
+        self.animation_timer.start(16)  # ~60fps 主渲染，降低 CPU 占用避免系统调度卡顿
+        
+        # 字体呼吸使用独立的更高频插值，但只在值变化时触发重绘
+        self._font_pulse_val = 0.0
+        self.font_pulse_timer = QTimer(self)
+        self.font_pulse_timer.timeout.connect(self.update_font_pulse)
+        self.font_pulse_timer.start(2)  # ~500fps 纯数值插值，不触发 paint
         
         self.drag_position = QPoint()
     
     def update_animations(self):
-        self._pulse_intensity = (math.sin(time.time() * 1.5) + 1) / 2
+        # 基础正弦波，周期约 6 秒
+        raw = (math.sin(time.time() * 1.05) + 1) / 2
+        # 非线性缓动：在两端（0 和 1）停留更久，中间过渡更快
+        # 使用 ease-in-out 曲线: 3x^2 - 2x^3
+        self._pulse_intensity = raw * raw * (3 - 2 * raw)
         self._error_blink += 0.15
         if self._error_blink > math.pi * 2:
             self._error_blink = 0
+        # 主渲染只更新非字体部分（边框、圆弧等），字体由 font_pulse_timer 驱动
         self.update()
+    
+    def update_font_pulse(self):
+        """独立字体微动插值，与主呼吸错开相位，产生更丰富的层次"""
+        t = time.time()
+        # 更快的微动波，周期约 3.5 秒，与主 6 秒波形成拍频
+        raw_fast = (math.sin(t * 1.8) + 1) / 2
+        self._font_pulse = raw_fast * raw_fast * (3 - 2 * raw_fast)
+        # 额外叠加一个极慢的漂移波，周期约 10 秒
+        drift = (math.sin(t * 0.63) + 1) / 2
+        self._font_drift = drift * drift * (3 - 2 * drift)
+        
+        # 计算新的组合值，只有变化超过阈值才触发重绘，避免无效 paint
+        combined = (
+            self._pulse_intensity * 0.60 +
+            self._font_pulse * 0.25 +
+            self._font_drift * 0.15
+        )
+        smooth = combined * combined * (3 - 2 * combined)
+        if abs(smooth - self._font_pulse_val) > 0.002:
+            self._font_pulse_val = smooth
+            self.update()
     
     def init_ui(self):
         self.apply_scale()
@@ -118,17 +153,17 @@ class KimiQuotaWidget(QWidget):
         
         tray_menu = QMenu()
         refresh_action = QAction("刷新额度", self)
-        refresh_action.setFont(QFont("Segoe UI", 9))
+        refresh_action.setFont(QFont("Inter", 9))
         refresh_action.triggered.connect(self.refresh_quota)
         tray_menu.addAction(refresh_action)
         
         reset_scale_action = QAction("重置大小", self)
-        reset_scale_action.setFont(QFont("Segoe UI", 9))
+        reset_scale_action.setFont(QFont("Inter", 9))
         reset_scale_action.triggered.connect(self.reset_scale)
         tray_menu.addAction(reset_scale_action)
         
         quit_action = QAction("退出", self)
-        quit_action.setFont(QFont("Segoe UI", 9))
+        quit_action.setFont(QFont("Inter", 9))
         quit_action.triggered.connect(self.close)
         tray_menu.addAction(quit_action)
         
@@ -192,11 +227,14 @@ class KimiQuotaWidget(QWidget):
         painter.drawEllipse(center_x - radius, center_y - radius, 
                             radius * 2, radius * 2)
         
-        # 绘制窗口限制进度条（10段）
+        # 绘制窗口限制进度条（内圈）
         self.draw_window_progress(painter, center_x, center_y, radius)
         
+        # 绘制窗口时间已过弧（外圈）
+        self.draw_window_countdown(painter, center_x, center_y, radius)
+        
         # 绘制边框
-        border_color = QColor(79, 172, 142, int(190 + self._pulse_intensity * 35))
+        border_color = QColor(79, 172, 142, int(180 + self._pulse_intensity * 50))
         painter.setPen(border_color)
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawEllipse(center_x - radius, center_y - radius, 
@@ -212,9 +250,9 @@ class KimiQuotaWidget(QWidget):
         
         window_percentage = min(int((self.quota_data['window_used'] / self.quota_data['window_limit']) * 100), 100)
         
-        # 进度条参数
-        progress_offset = int(10 * self._scale_factor)
-        segment_width = max(4, int(6 * self._scale_factor))  # 统一宽度
+        # 进度条参数 - 内圈，给外圈弧留出空间
+        progress_offset = int(14 * self._scale_factor)
+        segment_width = max(4, int(5 * self._scale_factor))
         progress_radius = radius - progress_offset
         
         # 判断颜色
@@ -246,6 +284,52 @@ class KimiQuotaWidget(QWidget):
                            progress_radius * 2, 
                            start_angle * 16, span_angle * 16)
     
+    def draw_window_countdown(self, painter, center_x, center_y, radius):
+        """绘制窗口时间已过弧（外圈单弧，青色，表示当前窗口周期已过去的比例）"""
+        if self.quota_data['weekly_used'] < 0:
+            return
+        
+        if not self.quota_data['window_reset_time']:
+            return
+        
+        now = datetime.now(timezone.utc)
+        total_remaining = (self.quota_data['window_reset_time'] - now).total_seconds()
+        window_seconds = getattr(self, '_window_duration_seconds', 18000)
+        
+        if total_remaining <= 0:
+            elapsed_percentage = 1.0  # 已过重置时间，全满
+        else:
+            elapsed_seconds = max(0, window_seconds - total_remaining)
+            elapsed_percentage = min(elapsed_seconds / window_seconds, 1.0)
+        
+        # 外圈参数 - 不要太靠外避免被截断
+        progress_offset = int(6 * self._scale_factor)
+        arc_width = max(3, int(5 * self._scale_factor))
+        progress_radius = radius - progress_offset
+        
+        # 颜色：随时间流逝从青色过渡到暖色
+        if elapsed_percentage > 0.8:
+            arc_color = QColor(220, 160, 80)       # 快重置 - 橙黄
+        elif elapsed_percentage > 0.5:
+            arc_color = QColor(80, 200, 180)        # 过半 - 青绿
+        else:
+            arc_color = QColor(60, 210, 200)        # 初期 - 亮青
+        
+        # 底部灰色圆环（始终不变）
+        painter.setPen(QPen(QColor(100, 100, 120, 60), arc_width))
+        painter.drawArc(center_x - progress_radius, center_y - progress_radius,
+                        progress_radius * 2, progress_radius * 2,
+                        90 * 16, -360 * 16)
+        
+        # 已过时间弧（从顶部顺时针，随时间推移逐渐填满）
+        # drawArc 的 spanAngle 单位是 1/16 度，需要乘以 16
+        span_angle = int(-360 * elapsed_percentage * 16)
+        
+        painter.setPen(QPen(arc_color, arc_width))
+        painter.drawArc(center_x - progress_radius, center_y - progress_radius,
+                        progress_radius * 2, progress_radius * 2,
+                        90 * 16, span_angle)
+    
     def draw_text(self, painter, center_x, center_y):
         """绘制文字 - 周用量用白色字体，窗口限制用进度条"""
         # 根据缩放比例调整字体大小
@@ -253,9 +337,9 @@ class KimiQuotaWidget(QWidget):
         main_font_size = max(14, int(22 * self._scale_factor))
         
         # 绘制标题
-        title_opacity = int(170 + self._pulse_intensity * 20)
+        title_opacity = int(160 + self._pulse_intensity * 40)
         painter.setPen(QColor(185, 205, 195, title_opacity))
-        painter.setFont(QFont("Segoe UI", title_font_size, QFont.Weight.Light))
+        painter.setFont(QFont("Inter", title_font_size, QFont.Weight.Light))
         
         title_width = int(50 * self._scale_factor)
         title_height = int(14 * self._scale_factor)
@@ -273,7 +357,7 @@ class KimiQuotaWidget(QWidget):
                                 int(108 * blink_intensity + 100 * (1 - blink_intensity)))
             
             painter.setPen(error_color)
-            painter.setFont(QFont("Segoe UI", int(16 * self._scale_factor), QFont.Weight.Bold))
+            painter.setFont(QFont("Inter", int(16 * self._scale_factor), QFont.Weight.Bold))
             
             err_width = int(40 * self._scale_factor)
             err_height = int(24 * self._scale_factor)
@@ -282,7 +366,7 @@ class KimiQuotaWidget(QWidget):
                              Qt.AlignmentFlag.AlignCenter, "ERR")
             
             painter.setPen(QColor(150, 170, 160))
-            painter.setFont(QFont("Segoe UI", max(5, int(6 * self._scale_factor)), QFont.Weight.Light))
+            painter.setFont(QFont("Inter", max(5, int(6 * self._scale_factor)), QFont.Weight.Light))
             
             hint_width = int(50 * self._scale_factor)
             hint_height = int(12 * self._scale_factor)
@@ -311,51 +395,25 @@ class KimiQuotaWidget(QWidget):
         # 周用量 - 使用白色字体
         text_color = QColor(255, 255, 255)
         
-        # 呼吸缩放效果
-        scale_factor = 1.0 + self._pulse_intensity * 0.04
-        painter.save()
-        painter.translate(center_x, center_y)
-        painter.scale(scale_factor, scale_factor)
+        # 使用 font_pulse_timer 已经计算好的平滑值，避免 paint 内重复计算
+        smooth = getattr(self, '_font_pulse_val', 0.5)
         
-        painter.setPen(text_color)
-        painter.setFont(QFont("Segoe UI", main_font_size, QFont.Weight.Bold))
+        breathe_scale = 1.0 + smooth * 0.12
+        breathed_font_size = main_font_size * breathe_scale
+        # 放大时更亮（255），缩小时稍暗（195），范围更大
+        breathe_alpha = int(195 + smooth * 60)
         
-        # 使用更大的绘制区域确保文字不被截断
-        text_width = int(60 * self._scale_factor)
-        text_height = int(30 * self._scale_factor)
-        painter.drawText(-text_width // 2, -text_height // 2 + int(2 * self._scale_factor), 
-                         text_width, text_height, 
+        painter.setPen(QColor(255, 255, 255, breathe_alpha))
+        font = QFont("Inter", QFont.Weight.Bold)
+        font.setPointSizeF(breathed_font_size)
+        painter.setFont(font)
+        
+        # 固定绘制区域，以中心为基准
+        text_width = int(70 * self._scale_factor)
+        text_height = int(36 * self._scale_factor)
+        painter.drawText(center_x - text_width // 2, center_y - text_height // 2,
+                         text_width, text_height,
                          Qt.AlignmentFlag.AlignCenter, f"{percentage}%")
-        
-        painter.restore()
-        
-        # 绘制窗口重置倒计时
-        if self.quota_data['window_reset_time']:
-            now = datetime.now(timezone.utc)
-            remaining = self.quota_data['window_reset_time'] - now
-            total_seconds = int(remaining.total_seconds())
-            if total_seconds > 0:
-                days = total_seconds // 86400
-                hours = (total_seconds % 86400) // 3600
-                minutes = (total_seconds % 3600) // 60
-
-                if days > 0:
-                    time_text = f"重置 {days}d {hours}h"
-                elif hours > 0:
-                    time_text = f"重置 {hours}h {minutes}m"
-                else:
-                    time_text = f"重置 {minutes}m"
-
-                painter.setPen(QColor(150, 170, 160, int(140 + self._pulse_intensity * 30)))
-                painter.setFont(QFont("Segoe UI", max(5, int(7 * self._scale_factor)), QFont.Weight.Light))
-
-                time_width = int(70 * self._scale_factor)
-                time_height = int(12 * self._scale_factor)
-                time_y_offset = int(24 * self._scale_factor)
-
-                painter.drawText(center_x - time_width // 2, center_y + time_y_offset,
-                                 time_width, time_height,
-                                 Qt.AlignmentFlag.AlignCenter, time_text)
     
     def create_icon(self):
         pixmap = QPixmap(24, 24)
@@ -381,7 +439,7 @@ class KimiQuotaWidget(QWidget):
                             radius * 2, radius * 2)
         
         painter.setPen(QColor(255, 255, 255))
-        painter.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+        painter.setFont(QFont("Inter", 9, QFont.Weight.Bold))
         painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, "K")
         
         painter.end()
@@ -530,6 +588,21 @@ class KimiQuotaWidget(QWidget):
                 self.quota_data['window_reset_time'] = self.quota_data['weekly_reset_time']
         
         self.quota_data['parallel_limit'] = int(data.get('parallel', {}).get('limit', '10'))
+        parallel_details = data.get('parallel', {}).get('details', [])
+        self.quota_data['parallel_used'] = len(parallel_details) if isinstance(parallel_details, list) else 0
+        self.quota_data['parallel_remaining'] = max(0, self.quota_data['parallel_limit'] - self.quota_data['parallel_used'])
+        
+        # 解析窗口周期（用于倒计时）
+        window_obj = limits[0].get('window', {}) if limits else {}
+        duration = int(window_obj.get('duration', 300))
+        time_unit = window_obj.get('timeUnit', 'TIME_UNIT_MINUTE')
+        if time_unit == 'TIME_UNIT_MINUTE':
+            self._window_duration_seconds = duration * 60
+        elif time_unit == 'TIME_UNIT_HOUR':
+            self._window_duration_seconds = duration * 3600
+        else:
+            self._window_duration_seconds = duration  # 默认秒
+        
         self._last_update_time = datetime.now()
     
     def mousePressEvent(self, event):
